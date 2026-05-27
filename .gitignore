@@ -19,3 +19,6 @@ build_test/
 .idea/
 *.swp
 *.swo
+
+# Claude
+.claude/
