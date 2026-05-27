@@ -1,0 +1,10 @@
+debug/main.o
+debug/widget.o
+debug/sessionclient.o
+debug/sessioncard.o
+debug/addsessiondialog.o
+debug/windowactivator.o
+debug/moc_widget.o
+debug/moc_sessionclient.o
+debug/moc_sessioncard.o
+debug/moc_addsessiondialog.o

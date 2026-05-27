@@ -1,0 +1,10 @@
+release/main.o
+release/widget.o
+release/sessionclient.o
+release/sessioncard.o
+release/addsessiondialog.o
+release/windowactivator.o
+release/moc_widget.o
+release/moc_sessionclient.o
+release/moc_sessioncard.o
+release/moc_addsessiondialog.o
