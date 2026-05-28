@@ -31,6 +31,7 @@ private:
     QSystemTrayIcon        *m_tray;
     QVBoxLayout            *m_cardLayout;
     QMap<QString, SessionCard*> m_cards;
+    QMap<QString, SessionStatus> m_prevStatus;
 };
 
 #endif // WIDGET_H

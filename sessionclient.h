@@ -43,6 +43,7 @@ struct CCSession {
     QString   jsonlPath;        // cached path to JSONL file
     QDateTime lastUserPromptAt; // timestamp of last real user prompt (not tool_result)
     bool      awaitingAssistant = false;  // user sent prompt, waiting for AI
+    QDateTime startedAt;        // when session was created
 };
 
 class QTimer;
@@ -74,7 +75,7 @@ private:
     void processFile(const QString &path, CCSession &session);
     void processEvent(const QJsonObject &event, CCSession &session);
     SessionStatus deriveStatus(const CCSession &session) const;
-    QString findJsonlForSession(const QString &sessionId) const;
+    QString findJsonlForSession(const CCSession &session) const;
     QString claudeDir() const;
 
     QTimer *m_timer;

@@ -11,6 +11,7 @@
 #include <QScrollArea>
 #include <QApplication>
 #include <QStyle>
+#include <algorithm>
 
 Widget::Widget(QWidget *parent)
     : QWidget(parent)
@@ -34,7 +35,7 @@ void Widget::setupUi()
 {
     setWindowTitle("CC Monitor");
     setWindowFlags(Qt::Window | Qt::WindowStaysOnTopHint | Qt::WindowMinMaxButtonsHint);
-    setMinimumSize(320, 350);
+    setMinimumSize(370, 350);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setStyleSheet("background: #11111b;");
 
@@ -115,10 +116,22 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
             m_cards[s.sessionId] = card;
         }
         card->updateFrom(s);
+
+        // Detect blue/red → green (task completed)
+        SessionStatus prev = m_prevStatus.value(s.sessionId, SessionStatus::Idle);
+        if (s.status == SessionStatus::Idle && prev != SessionStatus::Idle) {
+            m_tray->showMessage(
+                "Task Completed",
+                s.label + " has finished",
+                QSystemTrayIcon::Information, 3000
+            );
+        }
+        m_prevStatus[s.sessionId] = s.status;
     }
 
     for (auto it = m_cards.begin(); it != m_cards.end(); ) {
         if (!alive.contains(it.key())) {
+            m_prevStatus.remove(it.key());
             it.value()->deleteLater();
             it = m_cards.erase(it);
         } else {
@@ -157,8 +170,23 @@ void Widget::addSession()
 {
     AddSessionDialog dlg(m_monitor, this);
     if (dlg.exec() == QDialog::Accepted) {
-        for (const auto &sid : dlg.selectedSessionIds())
-            m_monitor->startMonitoring(sid);
+        // Sort by startedAt so earlier sessions claim their JSONL first,
+        // preventing later sessions from grabbing the wrong file
+        QList<CCSession> selected;
+        for (const auto &sid : dlg.selectedSessionIds()) {
+            for (const auto &s : m_monitor->scanAvailable()) {
+                if (s.sessionId == sid) {
+                    selected.append(s);
+                    break;
+                }
+            }
+        }
+        std::sort(selected.begin(), selected.end(),
+                  [](const CCSession &a, const CCSession &b) {
+                      return a.startedAt < b.startedAt;
+                  });
+        for (const auto &s : selected)
+            m_monitor->startMonitoring(s.sessionId);
     }
 }
 

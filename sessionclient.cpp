@@ -8,6 +8,7 @@
 #include <QJsonArray>
 #include <QDateTime>
 #include <QDirIterator>
+#include <climits>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -50,23 +51,6 @@ QString SessionMonitor::claudeDir() const
     return QDir::homePath() + "/.claude";
 }
 
-// Check if session has a JSONL file (active session indicator)
-static bool hasJsonlFile(const QString &sessionId, const QString &claudeDir)
-{
-    QString projectsDir = claudeDir + "/projects";
-    QDir dir(projectsDir);
-    if (!dir.exists()) return false;
-
-    QDirIterator it(projectsDir, {sessionId + "*.jsonl"}, QDir::Files,
-                    QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        QString path = it.next();
-        if (path.contains("compact")) continue;
-        return true;
-    }
-    return false;
-}
-
 QList<CCSession> SessionMonitor::scanAvailable()
 {
     QList<CCSession> result;
@@ -85,12 +69,10 @@ QList<CCSession> SessionMonitor::scanAvailable()
         s.pid        = obj["pid"].toVariant().toLongLong();
         s.cwd        = obj["cwd"].toString();
         s.entrypoint = obj["entrypoint"].toString();
+        s.startedAt  = QDateTime::fromMSecsSinceEpoch(obj["startedAt"].toVariant().toLongLong());
 
         if (s.sessionId.isEmpty()) continue;
         if (s.pid > 0 && !isPidAlive(s.pid)) continue;  // skip zombie sessions
-
-        // Skip sessions without JSONL file (inactive/orphaned sessions)
-        if (!hasJsonlFile(s.sessionId, claudeDir())) continue;
 
         // derive label from cwd
         if (!s.cwd.isEmpty()) {
@@ -119,8 +101,25 @@ void SessionMonitor::startMonitoring(const QString &sessionId)
         s.pid = m_knownPids[sessionId];
     }
 
+    // try to get cwd and startedAt from session file
+    QString sessionsDir = claudeDir() + "/sessions";
+    QDir dir(sessionsDir);
+    if (dir.exists()) {
+        for (const auto &fi : dir.entryInfoList({"*.json"}, QDir::Files)) {
+            QFile f(fi.absoluteFilePath());
+            if (!f.open(QIODevice::ReadOnly)) continue;
+            QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+            f.close();
+            if (obj["sessionId"].toString() == sessionId) {
+                s.cwd = obj["cwd"].toString();
+                s.startedAt = QDateTime::fromMSecsSinceEpoch(obj["startedAt"].toVariant().toLongLong());
+                break;
+            }
+        }
+    }
+
     // find and read initial JSONL data
-    QString jsonlPath = findJsonlForSession(sessionId);
+    QString jsonlPath = findJsonlForSession(s);
     if (!jsonlPath.isEmpty()) {
         s.jsonlPath = jsonlPath;
         processFile(jsonlPath, s);
@@ -205,31 +204,144 @@ void SessionMonitor::scanJsonlFiles()
     for (auto it = m_monitored.begin(); it != m_monitored.end(); ++it) {
         CCSession &s = it.value();
 
-        // use cached path, or find it
-        if (s.jsonlPath.isEmpty())
-            s.jsonlPath = findJsonlForSession(s.sessionId);
+        if (s.jsonlPath.isEmpty()) {
+            s.jsonlPath = findJsonlForSession(s);
+        } else if (!QFile::exists(s.jsonlPath)) {
+            // cached path gone (file deleted/moved) — retry
+            s.jsonlPath = findJsonlForSession(s);
+        }
 
         if (s.jsonlPath.isEmpty()) continue;
         processFile(s.jsonlPath, s);
     }
 }
 
-QString SessionMonitor::findJsonlForSession(const QString &sessionId) const
+static QString encodeCwd(const QString &cwd)
+{
+    QString result = cwd;
+    result.replace(QChar('\\'), QChar('-'));
+    result.replace(QChar('/'), QChar('-'));
+    result.replace(QChar(':'), QChar('-'));
+    return result;
+}
+
+static QString findProjectDir(const QString &projectsDir, const QString &cwd)
+{
+    QString encoded = encodeCwd(cwd);
+    QDir dir(projectsDir);
+    for (const auto &fi : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (QString::compare(fi.fileName(), encoded, Qt::CaseInsensitive) == 0)
+            return fi.absoluteFilePath();
+    }
+    return {};
+}
+
+struct JsonlMetadata {
+    QString sessionId;
+    QString entrypoint;
+    QString cwd;
+    QDateTime firstTimestamp;
+};
+
+static JsonlMetadata readJsonlMetadata(const QString &jsonPath)
+{
+    JsonlMetadata meta;
+    QFile f(jsonPath);
+    if (!f.open(QIODevice::ReadOnly)) return meta;
+
+    QByteArray line = f.readLine();
+    f.close();
+
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(line, &err);
+    if (err.error != QJsonParseError::NoError) return meta;
+
+    QJsonObject obj = doc.object();
+    meta.sessionId  = obj["sessionId"].toString();
+    meta.entrypoint = obj["entrypoint"].toString();
+    meta.cwd        = obj["cwd"].toString();
+
+    QString ts = obj["timestamp"].toString();
+    if (!ts.isEmpty())
+        meta.firstTimestamp = QDateTime::fromString(ts, Qt::ISODateWithMs);
+
+    return meta;
+}
+
+QString SessionMonitor::findJsonlForSession(const CCSession &session) const
 {
     QString projectsDir = claudeDir() + "/projects";
     QDir dir(projectsDir);
     if (!dir.exists()) return {};
 
-    // search recursively for <sessionId>.jsonl
-    QDirIterator it(projectsDir, {sessionId + "*.jsonl"}, QDir::Files,
+    // Step 1: Exact sessionId match (fast path)
+    QDirIterator it(projectsDir, {session.sessionId + "*.jsonl"}, QDir::Files,
                     QDirIterator::Subdirectories);
     while (it.hasNext()) {
         QString path = it.next();
-        // skip compact files
         if (path.contains("compact")) continue;
         return path;
     }
-    return {};
+
+    // Step 2: Fallback - find unclaimed JSONL in same project
+    if (session.cwd.isEmpty()) return {};
+
+    QString projectPath = findProjectDir(projectsDir, session.cwd);
+    if (projectPath.isEmpty()) return {};
+
+    // Collect all JSONL files (non-recursive)
+    QFileInfoList files = QDir(projectPath).entryInfoList({"*.jsonl"}, QDir::Files);
+
+    // Build exclusion set: paths claimed by other monitored sessions
+    QSet<QString> claimedPaths;
+    for (auto it2 = m_monitored.constBegin(); it2 != m_monitored.constEnd(); ++it2) {
+        if (it2.key() == session.sessionId) continue;
+        if (!it2.value().jsonlPath.isEmpty())
+            claimedPaths.insert(it2.value().jsonlPath);
+    }
+
+    // Find candidate JSONL files: unclaimed, not compact/subagents,
+    // and not belonging to another active session (even if not yet monitored)
+    QStringList candidates;
+    for (const auto &fi : files) {
+        if (fi.fileName().contains("compact")) continue;
+        if (fi.fileName().contains("subagents")) continue;
+        if (claimedPaths.contains(fi.absoluteFilePath())) continue;
+
+        JsonlMetadata meta = readJsonlMetadata(fi.absoluteFilePath());
+        // Skip JSONL files whose internal sessionId belongs to another active session
+        if (!meta.sessionId.isEmpty()
+            && meta.sessionId != session.sessionId
+            && m_knownPids.contains(meta.sessionId))
+            continue;
+
+        candidates.append(fi.absoluteFilePath());
+    }
+
+    if (candidates.isEmpty()) return {};
+
+    // Time proximity: select JSONL whose first event timestamp is closest to session startedAt
+    if (!session.startedAt.isValid())
+        return candidates.first();
+
+    QString bestPath;
+    qint64 bestDiff = LLONG_MAX;
+
+    for (const auto &path : candidates) {
+        JsonlMetadata meta = readJsonlMetadata(path);
+        qint64 fileTime;
+        if (meta.firstTimestamp.isValid())
+            fileTime = meta.firstTimestamp.toMSecsSinceEpoch();
+        else
+            fileTime = QFileInfo(path).birthTime().toMSecsSinceEpoch();
+        qint64 diff = qAbs(fileTime - session.startedAt.toMSecsSinceEpoch());
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            bestPath = path;
+        }
+    }
+
+    return bestPath.isEmpty() ? candidates.first() : bestPath;
 }
 
 void SessionMonitor::processFile(const QString &path, CCSession &session)
@@ -387,7 +499,7 @@ SessionStatus SessionMonitor::deriveStatus(const CCSession &session) const
         for (auto it = session.toolUseTimestamps.begin(); it != session.toolUseTimestamps.end(); ++it) {
             if (session.pendingToolUseIds.contains(it.key())) {
                 qint64 waitSecs = it.value().secsTo(now);
-                if (waitSecs >= 1) {
+                if (waitSecs >= 2) {
                     needsApproval = true;
                     break;
                 }
@@ -398,9 +510,16 @@ SessionStatus SessionMonitor::deriveStatus(const CCSession &session) const
         return SessionStatus::Thinking;             // blue — auto-executing
     }
 
-    // no events yet → idle
-    if (!session.lastEventAt.isValid())
+    // no events yet → idle, unless session just started
+    if (!session.lastEventAt.isValid()) {
+        // If session started within last 5 minutes, show thinking (waiting for JSONL data)
+        if (session.startedAt.isValid()) {
+            qint64 secsSinceStart = session.startedAt.secsTo(QDateTime::currentDateTime());
+            if (secsSinceStart < 300)  // 5 minutes
+                return SessionStatus::Thinking;  // blue — waiting for data
+        }
         return SessionStatus::Idle;
+    }
 
     qint64 elapsed = session.lastEventAt.secsTo(QDateTime::currentDateTime());
 
