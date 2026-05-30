@@ -221,7 +221,11 @@ bool SessionMonitor::isMonitoring(const QString &sessionId) const
 
 void SessionMonitor::onTimeout()
 {
-    scanSessions();
+    // Session metadata changes infrequently; scan every ~6s (4 ticks at 1.5s)
+    if (++m_sessionScanCounter >= 4) {
+        m_sessionScanCounter = 0;
+        scanSessions();
+    }
     scanJsonlFiles();
 
     // emit updated list
@@ -273,7 +277,7 @@ void SessionMonitor::scanSessions()
         // update monitored session's pid/cwd if found
         if (m_monitored.contains(sid)) {
             auto &s = m_monitored[sid];
-            s.pid = pid;
+            if (s.pid == 0) s.pid = pid;
             if (s.cwd.isEmpty()) s.cwd = obj["cwd"].toString();
             if (s.entrypoint.isEmpty()) s.entrypoint = obj["entrypoint"].toString();
             if (!s.startedAt.isValid()) s.startedAt = startedAt;
@@ -506,11 +510,11 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
         if (msg.contains("model"))
             session.model = msg["model"].toString();
 
-        // usage
+        // usage — JSONL carries cumulative values, overwrite (not accumulate)
         QJsonObject usage = msg["usage"].toObject();
         if (!usage.isEmpty()) {
-            session.tokensIn += usage["input_tokens"].toInt();
-            session.tokensOut += usage["output_tokens"].toInt();
+            session.tokensIn  = usage["input_tokens"].toInt();
+            session.tokensOut = usage["output_tokens"].toInt();
         }
         if (event.contains("costUSD"))
             session.costUSD += event["costUSD"].toDouble();

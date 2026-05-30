@@ -11,6 +11,8 @@
 #include <QScrollArea>
 #include <QApplication>
 #include <QStyle>
+#include <QMessageBox>
+#include <QMouseEvent>
 #include <algorithm>
 
 Widget::Widget(QWidget *parent)
@@ -34,7 +36,7 @@ Widget::Widget(QWidget *parent)
 void Widget::setupUi()
 {
     setWindowTitle("CC Monitor");
-    setWindowFlags(Qt::Window | Qt::WindowStaysOnTopHint | Qt::WindowMinMaxButtonsHint);
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setMinimumSize(370, 350);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setStyleSheet("background: #11111b;");
@@ -51,9 +53,20 @@ void Widget::setupUi()
     );
     connect(addBtn, &QPushButton::clicked, this, &Widget::addSession);
 
+    auto *minBtn = new QPushButton("—");
+    minBtn->setFixedSize(28, 28);
+    minBtn->setStyleSheet(
+        "QPushButton { background: #313244; color: #cdd6f4; border: none; "
+        "border-radius: 14px; font-size: 14px; font-weight: bold; }"
+        "QPushButton:hover { background: #45475a; }"
+    );
+    connect(minBtn, &QPushButton::clicked, this, &Widget::showMinimized);
+
     auto *header = new QHBoxLayout;
     header->setContentsMargins(12, 10, 10, 6);
+    header->setSpacing(6);
     header->addWidget(title, 1);
+    header->addWidget(minBtn);
     header->addWidget(addBtn);
 
     auto *scrollContent = new QWidget;
@@ -113,6 +126,22 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
             card = new SessionCard;
             connect(card, &SessionCard::clicked, this, &Widget::onCardClicked);
             connect(card, &SessionCard::closeRequested, this, [this](const QString &sessionId) {
+                QMessageBox dlg(this);
+                dlg.setWindowTitle("Stop Monitoring");
+                dlg.setText("Remove this session from the monitor?");
+                dlg.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+                dlg.setDefaultButton(QMessageBox::No);
+                dlg.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+                dlg.setStyleSheet(
+                    "QMessageBox { background: #11111b; color: #cdd6f4; }"
+                    "QLabel { color: #cdd6f4; font-size: 13px; }"
+                    "QPushButton { background: #313244; color: #cdd6f4; border: none; "
+                    "border-radius: 4px; padding: 6px 20px; font-weight: bold; }"
+                    "QPushButton:hover { background: #45475a; }"
+                );
+                dlg.move(pos() + (rect().center() - dlg.rect().center()));
+                if (dlg.exec() != QMessageBox::Yes)
+                    return;
                 m_monitor->stopMonitoring(sessionId);
                 m_prevStatus.remove(sessionId);
                 if (SessionCard *removed = m_cards.take(sessionId))
@@ -200,4 +229,18 @@ void Widget::closeEvent(QCloseEvent *event)
 {
     hide();
     event->ignore();
+}
+
+void Widget::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton)
+        m_dragPos = event->globalPosition().toPoint() - pos();
+    QWidget::mousePressEvent(event);
+}
+
+void Widget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (event->buttons() & Qt::LeftButton && !m_dragPos.isNull())
+        move(event->globalPosition().toPoint() - m_dragPos);
+    QWidget::mouseMoveEvent(event);
 }

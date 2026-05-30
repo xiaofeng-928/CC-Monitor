@@ -80,6 +80,7 @@ private:
     QString claudeDir() const;
 
     QTimer *m_timer;
+    int     m_sessionScanCounter = 0;       // decouple scanSessions frequency from JSONL
     QMap<QString, CCSession> m_monitored;   // sessionId → session
     QMap<QString, qint64>    m_knownPids;   // sessionId → pid (from sessions/)
 };

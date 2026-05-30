@@ -17,6 +17,8 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
 
 private:
     void setupUi();
@@ -32,6 +34,8 @@ private:
     QVBoxLayout            *m_cardLayout;
     QMap<QString, SessionCard*> m_cards;
     QMap<QString, SessionStatus> m_prevStatus;
+
+    QPoint m_dragPos;
 };
 
 #endif // WIDGET_H
