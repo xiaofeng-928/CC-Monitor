@@ -2,26 +2,27 @@
 #include "sessioncard.h"
 #include "addsessiondialog.h"
 #include "windowactivator.h"
+#include "floatingball.h"
+#include "soundmanager.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QCloseEvent>
-#include <QMenu>
-#include <QScrollArea>
 #include <QApplication>
-#include <QStyle>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPropertyAnimation>
+#include <QScreen>
 #include <algorithm>
 
 Widget::Widget(QWidget *parent)
     : QWidget(parent)
     , m_monitor(new SessionMonitor(this))
-    , m_tray(new QSystemTrayIcon(this))
+    , m_ball(new FloatingBall)
+    , m_soundMgr(new SoundManager(this))
 {
     setupUi();
-    setupTray();
 
     connect(m_monitor, &SessionMonitor::sessionsUpdated,
             this, &Widget::onSessionsUpdated);
@@ -29,16 +30,36 @@ Widget::Widget(QWidget *parent)
             this, &Widget::onNeedsAttention);
     connect(m_monitor, &SessionMonitor::sessionStuck,
             this, &Widget::onSessionStuck);
+    connect(m_ball, &FloatingBall::toggleMainWindow,
+            this, &Widget::onToggleWindow);
+    connect(m_ball, &FloatingBall::jumpToSession,
+            this, &Widget::onJumpToSession);
 
     m_monitor->start();
+    m_ball->show();
+
+    // Initial position next to the floating ball
+    QPoint ballPos = m_ball->pos();
+    int ballW = m_ball->width();
+    int x = ballPos.x() + ballW + 8;
+    int y = ballPos.y();
+    QScreen *screen = QGuiApplication::screenAt(ballPos + QPoint(ballW / 2, 0));
+    if (screen) {
+        QRect geo = screen->availableGeometry();
+        if (x + width() > geo.right())
+            x = ballPos.x() - width() - 8;
+        if (y < geo.top()) y = geo.top();
+        if (y + height() > geo.bottom()) y = geo.bottom() - height();
+    }
+    move(x, y);
 }
 
 void Widget::setupUi()
 {
     setWindowTitle("CC Monitor");
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    setMinimumSize(370, 350);
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    setMinimumWidth(370);
+    setMouseTracking(true);
     setStyleSheet("background: #11111b;");
 
     auto *title = new QLabel("CC Monitor");
@@ -53,70 +74,78 @@ void Widget::setupUi()
     );
     connect(addBtn, &QPushButton::clicked, this, &Widget::addSession);
 
-    auto *minBtn = new QPushButton("—");
-    minBtn->setFixedSize(28, 28);
-    minBtn->setStyleSheet(
-        "QPushButton { background: #313244; color: #cdd6f4; border: none; "
-        "border-radius: 14px; font-size: 14px; font-weight: bold; }"
-        "QPushButton:hover { background: #45475a; }"
-    );
-    connect(minBtn, &QPushButton::clicked, this, &Widget::showMinimized);
-
     auto *header = new QHBoxLayout;
     header->setContentsMargins(12, 10, 10, 6);
     header->setSpacing(6);
     header->addWidget(title, 1);
-    header->addWidget(minBtn);
     header->addWidget(addBtn);
 
-    auto *scrollContent = new QWidget;
-    scrollContent->setStyleSheet("background: transparent;");
-    m_cardLayout = new QVBoxLayout(scrollContent);
-    m_cardLayout->setContentsMargins(8, 0, 8, 0);
+    // Card container — no scroll area initially
+    m_cardContainer = new QWidget;
+    m_cardContainer->setStyleSheet("background: transparent;");
+    m_cardLayout = new QVBoxLayout(m_cardContainer);
+    m_cardLayout->setContentsMargins(8, 0, 8, 8);
     m_cardLayout->setSpacing(6);
-    m_cardLayout->addStretch();
-
-    auto *scroll = new QScrollArea;
-    scroll->setWidget(scrollContent);
-    scroll->setWidgetResizable(true);
-    scroll->setStyleSheet(
-        "QScrollArea { border: none; background: transparent; }"
-        "QScrollBar:vertical { width: 6px; background: transparent; }"
-        "QScrollBar::handle:vertical { background: #45475a; border-radius: 3px; }"
-    );
+    // No addStretch() — critical for elastic behavior
 
     auto *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
     mainLayout->addLayout(header);
-    mainLayout->addWidget(scroll, 1);
+    mainLayout->addWidget(m_cardContainer);
+
+    resize(370, 44);
 }
 
-void Widget::setupTray()
+QSize Widget::sizeHint() const
 {
-    m_tray->setIcon(QApplication::style()->standardIcon(QStyle::SP_ComputerIcon));
-    m_tray->setToolTip("CC Monitor");
+    int cardH = 0;
+    if (!m_cards.isEmpty()) {
+        // Ask the layout for its ideal size
+        cardH = m_cardLayout->sizeHint().height();
+    }
+    int tb = (m_toolbarHeight > 0) ? m_toolbarHeight : 44;
+    return QSize(width(), tb + cardH);
+}
 
-    auto *menu = new QMenu(this);
-    menu->setStyleSheet(
-        "QMenu { background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244; }"
-        "QMenu::item:selected { background: #313244; }"
-    );
-    menu->addAction("Show", this, &Widget::showNormal);
-    menu->addSeparator();
-    menu->addAction("Quit", qApp, &QApplication::quit);
+void Widget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (m_toolbarHeight == 0) {
+        // Measure toolbar height after first layout pass
+        m_toolbarHeight = height() - m_cardContainer->height();
+        if (m_toolbarHeight <= 0)
+            m_toolbarHeight = 44;
+        // Resize to toolbar-only if no cards
+        if (m_cards.isEmpty())
+            resize(width(), m_toolbarHeight);
+    }
+}
 
-    m_tray->setContextMenu(menu);
-    m_tray->show();
+void Widget::elasticResize()
+{
+    QSize target = sizeHint();
 
-    connect(m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
-        if (reason == QSystemTrayIcon::DoubleClick)
-            showNormal();
-    });
+    // Cap at screen height
+    QScreen *screen = QGuiApplication::screenAt(pos() + QPoint(width() / 2, height() / 2));
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (screen) {
+        int maxH = screen->availableGeometry().height() - 40;
+        if (target.height() > maxH)
+            target.setHeight(maxH);
+    }
+
+    auto *anim = new QPropertyAnimation(this, "size");
+    anim->setDuration(150);
+    anim->setStartValue(size());
+    anim->setEndValue(target);
+    anim->setEasingCurve(QEasingCurve::OutQuad);
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
 {
+    int prevCardCount = m_cards.size();
     QSet<QString> alive;
     for (const auto &s : sessions) {
         alive.insert(s.sessionId);
@@ -139,15 +168,19 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
                     "border-radius: 4px; padding: 6px 20px; font-weight: bold; }"
                     "QPushButton:hover { background: #45475a; }"
                 );
-                dlg.move(pos() + (rect().center() - dlg.rect().center()));
+                // Fix: force layout then center properly
+                dlg.adjustSize();
+                QPoint globalCenter = mapToGlobal(rect().center());
+                dlg.move(globalCenter - dlg.rect().center());
                 if (dlg.exec() != QMessageBox::Yes)
                     return;
                 m_monitor->stopMonitoring(sessionId);
                 m_prevStatus.remove(sessionId);
                 if (SessionCard *removed = m_cards.take(sessionId))
                     removed->deleteLater();
+                elasticResize();
             });
-            m_cardLayout->insertWidget(m_cardLayout->count() - 1, card);
+            m_cardLayout->addWidget(card);
             m_cards[s.sessionId] = card;
         }
         card->updateFrom(s);
@@ -155,43 +188,41 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
         // Detect blue/red → green (task completed)
         SessionStatus prev = m_prevStatus.value(s.sessionId, SessionStatus::Idle);
         if (s.status == SessionStatus::Idle && prev != SessionStatus::Idle) {
-            m_tray->showMessage(
-                "Task Completed",
-                s.label + " has finished",
-                QSystemTrayIcon::Information, 3000
-            );
+            m_soundMgr->playTaskCompleted();
+            m_ball->triggerAlert(SessionStatus::Idle, s.label, s.pid);
         }
         m_prevStatus[s.sessionId] = s.status;
     }
 
+    bool removed = false;
     for (auto it = m_cards.begin(); it != m_cards.end(); ) {
         if (!alive.contains(it.key())) {
             m_prevStatus.remove(it.key());
             it.value()->deleteLater();
             it = m_cards.erase(it);
+            removed = true;
         } else {
             ++it;
         }
     }
+
+    // Resize whenever card count changes (added or removed)
+    if (removed || m_cards.size() != prevCardCount)
+        elasticResize();
+
+    updateFloatingBall();
 }
 
 void Widget::onNeedsAttention(const CCSession &session)
 {
-    m_tray->showMessage(
-        "Claude Code Needs You",
-        session.label + " is waiting for approval",
-        QSystemTrayIcon::Warning, 5000
-    );
-    QApplication::alert(this);
+    m_soundMgr->playNeedsApproval();
+    m_ball->triggerAlert(SessionStatus::WaitingApproval, session.label, session.pid);
 }
 
 void Widget::onSessionStuck(const CCSession &session)
 {
-    m_tray->showMessage(
-        "Session Stuck",
-        session.label + " — no response for 60s",
-        QSystemTrayIcon::Warning, 5000
-    );
+    m_soundMgr->playSessionStuck();
+    m_ball->triggerAlert(SessionStatus::Stuck, session.label, session.pid);
 }
 
 void Widget::onCardClicked(const QString &sessionId)
@@ -205,8 +236,6 @@ void Widget::addSession()
 {
     AddSessionDialog dlg(m_monitor, this);
     if (dlg.exec() == QDialog::Accepted) {
-        // Sort by startedAt so earlier sessions claim their JSONL first,
-        // preventing later sessions from grabbing the wrong file
         QList<CCSession> selected;
         for (const auto &sid : dlg.selectedSessionIds()) {
             for (const auto &s : m_monitor->scanAvailable()) {
@@ -225,6 +254,68 @@ void Widget::addSession()
     }
 }
 
+void Widget::onToggleWindow()
+{
+    if (isVisible()) {
+        hide();
+    } else {
+        // Position next to the floating ball
+        QPoint ballPos = m_ball->pos();
+        int ballW = m_ball->width();
+        QScreen *screen = QGuiApplication::screenAt(ballPos + QPoint(ballW / 2, 0));
+        if (!screen) screen = QGuiApplication::primaryScreen();
+
+        int x = ballPos.x() + ballW + 8;
+        int y = ballPos.y();
+
+        if (screen) {
+            QRect geo = screen->availableGeometry();
+            // If not enough space on the right, put on the left
+            if (x + width() > geo.right())
+                x = ballPos.x() - width() - 8;
+            // Clamp vertically
+            if (y + height() > geo.bottom())
+                y = geo.bottom() - height();
+            if (y < geo.top())
+                y = geo.top();
+        }
+
+        move(x, y);
+        show();
+        activateWindow();
+        raise();
+    }
+}
+
+void Widget::onJumpToSession(qint64 pid)
+{
+    activateProcessWindow(pid);
+}
+
+void Widget::updateFloatingBall()
+{
+    SessionStatus aggregate = SessionStatus::Idle;
+    int waitingCount = 0, thinkingCount = 0, stuckCount = 0;
+
+    for (const auto &s : m_prevStatus) {
+        if (s == SessionStatus::WaitingApproval || s == SessionStatus::Error) {
+            waitingCount++;
+            aggregate = SessionStatus::WaitingApproval;
+        } else if (s == SessionStatus::Stuck) {
+            stuckCount++;
+            if (aggregate != SessionStatus::WaitingApproval)
+                aggregate = SessionStatus::Stuck;
+        } else if (s == SessionStatus::Thinking) {
+            thinkingCount++;
+            if (aggregate == SessionStatus::Idle)
+                aggregate = SessionStatus::Thinking;
+        }
+    }
+
+    m_ball->setAggregateStatus(aggregate, m_cards.size(),
+                               waitingCount, thinkingCount, stuckCount);
+}
+
 void Widget::closeEvent(QCloseEvent *event)
 {
     hide();
@@ -233,14 +324,40 @@ void Widget::closeEvent(QCloseEvent *event)
 
 void Widget::mousePressEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::LeftButton)
-        m_dragPos = event->globalPosition().toPoint() - pos();
+    if (event->button() == Qt::LeftButton) {
+        int rightEdge = width() - static_cast<int>(event->position().x());
+        if (rightEdge <= 6) {
+            m_resizingWidth = true;
+            m_resizeStartWidth = width();
+            m_resizeStartPos = event->globalPosition().toPoint();
+        } else {
+            m_resizingWidth = false;
+            m_dragPos = event->globalPosition().toPoint() - pos();
+        }
+    }
     QWidget::mousePressEvent(event);
 }
 
 void Widget::mouseMoveEvent(QMouseEvent *event)
 {
-    if (event->buttons() & Qt::LeftButton && !m_dragPos.isNull())
-        move(event->globalPosition().toPoint() - m_dragPos);
+    if (event->buttons() & Qt::LeftButton) {
+        if (m_resizingWidth) {
+            int dx = event->globalPosition().x() - m_resizeStartPos.x();
+            int newWidth = qMax(minimumWidth(), m_resizeStartWidth + dx);
+            resize(newWidth, height());
+        } else if (!m_dragPos.isNull()) {
+            move(event->globalPosition().toPoint() - m_dragPos);
+        }
+    } else {
+        // Update cursor based on proximity to right edge
+        int rightEdge = width() - static_cast<int>(event->position().x());
+        setCursor(rightEdge <= 6 ? Qt::SizeHorCursor : Qt::ArrowCursor);
+    }
     QWidget::mouseMoveEvent(event);
+}
+
+void Widget::mouseReleaseEvent(QMouseEvent *event)
+{
+    m_resizingWidth = false;
+    QWidget::mouseReleaseEvent(event);
 }
