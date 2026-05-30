@@ -112,6 +112,12 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
         if (!card) {
             card = new SessionCard;
             connect(card, &SessionCard::clicked, this, &Widget::onCardClicked);
+            connect(card, &SessionCard::closeRequested, this, [this](const QString &sessionId) {
+                m_monitor->stopMonitoring(sessionId);
+                m_prevStatus.remove(sessionId);
+                if (SessionCard *removed = m_cards.take(sessionId))
+                    removed->deleteLater();
+            });
             m_cardLayout->insertWidget(m_cardLayout->count() - 1, card);
             m_cards[s.sessionId] = card;
         }

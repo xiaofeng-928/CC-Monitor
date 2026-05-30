@@ -10,22 +10,100 @@
 #include <QDirIterator>
 #include <climits>
 
+static constexpr int MaxJsonlLinesPerScan = 1000;
+static constexpr qint64 MaxJsonlBytesPerScan = 1024 * 1024;
+
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
 
-static bool isPidAlive(qint64 pid)
+static QDateTime parseClaudeTimestamp(const QString &ts)
+{
+    QDateTime dt = QDateTime::fromString(ts, Qt::ISODateWithMs);
+    if (!dt.isValid())
+        dt = QDateTime::fromString(ts, Qt::ISODate);
+    return dt;
+}
+
+static bool isPidAlive(qint64 pid, const QDateTime &sessionStartedAt = {})
 {
 #ifdef Q_OS_WIN
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
     if (!h) return false;
+
     DWORD exitCode = 0;
-    GetExitCodeProcess(h, &exitCode);
+    if (!GetExitCodeProcess(h, &exitCode) || exitCode != STILL_ACTIVE) {
+        CloseHandle(h);
+        return false;
+    }
+
+    if (sessionStartedAt.isValid()) {
+        FILETIME creationTime, exitTime, kernelTime, userTime;
+        if (GetProcessTimes(h, &creationTime, &exitTime, &kernelTime, &userTime)) {
+            ULARGE_INTEGER ticks;
+            ticks.LowPart = creationTime.dwLowDateTime;
+            ticks.HighPart = creationTime.dwHighDateTime;
+            qint64 createdMs = static_cast<qint64>(ticks.QuadPart / 10000ULL) - 11644473600000LL;
+            QDateTime processCreatedAt = QDateTime::fromMSecsSinceEpoch(createdMs);
+
+            // A reused PID will have a process creation time after the session's
+            // recorded start time. Allow a small clock/write-order tolerance.
+            if (processCreatedAt > sessionStartedAt.addSecs(5)) {
+                CloseHandle(h);
+                return false;
+            }
+        }
+    }
+
     CloseHandle(h);
-    return exitCode == STILL_ACTIVE;
+    return true;
 #else
+    Q_UNUSED(sessionStartedAt);
     return kill(pid, 0) == 0;
 #endif
+}
+
+static QString makeSessionLabel(const QString &cwd)
+{
+    QFileInfo current(QDir::cleanPath(cwd));
+    QString child = current.fileName();
+    QString parent = QFileInfo(current.absolutePath()).fileName();
+
+    if (!parent.isEmpty() && !child.isEmpty())
+        return parent + "/" + child;
+    if (!child.isEmpty())
+        return child;
+    return cwd;
+}
+
+static bool isReadOnlyTool(const QString &name)
+{
+    return name == "Read"
+        || name == "Grep"
+        || name == "Glob"
+        || name == "LS";
+}
+
+static bool isEditTool(const QString &name)
+{
+    return name == "Edit"
+        || name == "Write"
+        || name == "MultiEdit"
+        || name == "NotebookEdit";
+}
+
+static bool shouldTreatPendingToolAsThinking(const QString &permissionMode, const QString &toolName)
+{
+    if (permissionMode == "bypassPermissions")
+        return true;
+
+    if (isReadOnlyTool(toolName))
+        return true;
+
+    if (permissionMode == "acceptEdits" && isEditTool(toolName))
+        return true;
+
+    return false;
 }
 
 SessionMonitor::SessionMonitor(QObject *parent)
@@ -38,7 +116,7 @@ SessionMonitor::SessionMonitor(QObject *parent)
 void SessionMonitor::start()
 {
     onTimeout();
-    m_timer->start(3000);
+    m_timer->start(1500);
 }
 
 void SessionMonitor::stop()
@@ -72,15 +150,11 @@ QList<CCSession> SessionMonitor::scanAvailable()
         s.startedAt  = QDateTime::fromMSecsSinceEpoch(obj["startedAt"].toVariant().toLongLong());
 
         if (s.sessionId.isEmpty()) continue;
-        if (s.pid > 0 && !isPidAlive(s.pid)) continue;  // skip zombie sessions
+        if (s.pid > 0 && !isPidAlive(s.pid, s.startedAt)) continue;  // skip zombie/reused sessions
 
         // derive label from cwd
-        if (!s.cwd.isEmpty()) {
-            QStringList parts = s.cwd.split(QStringLiteral(R"(/\)"), Qt::SkipEmptyParts);
-            s.label = parts.size() >= 2
-                ? parts[parts.size() - 2] + "/" + parts.last()
-                : parts.last();
-        }
+        if (!s.cwd.isEmpty())
+            s.label = makeSessionLabel(s.cwd);
         if (s.label.isEmpty())
             s.label = QStringLiteral("PID:%1").arg(s.pid);
 
@@ -111,12 +185,19 @@ void SessionMonitor::startMonitoring(const QString &sessionId)
             QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
             f.close();
             if (obj["sessionId"].toString() == sessionId) {
+                s.pid = obj["pid"].toVariant().toLongLong();
                 s.cwd = obj["cwd"].toString();
+                s.entrypoint = obj["entrypoint"].toString();
                 s.startedAt = QDateTime::fromMSecsSinceEpoch(obj["startedAt"].toVariant().toLongLong());
+                if (!s.cwd.isEmpty())
+                    s.label = makeSessionLabel(s.cwd);
                 break;
             }
         }
     }
+
+    if (s.pid > 0 && !isPidAlive(s.pid, s.startedAt))
+        return;
 
     // find and read initial JSONL data
     QString jsonlPath = findJsonlForSession(s);
@@ -166,7 +247,12 @@ void SessionMonitor::scanSessions()
 {
     QString sessionsDir = claudeDir() + "/sessions";
     QDir dir(sessionsDir);
-    if (!dir.exists()) return;
+    if (!dir.exists()) {
+        m_knownPids.clear();
+        return;
+    }
+
+    QMap<QString, qint64> activePids;
 
     for (const auto &fi : dir.entryInfoList({"*.json"}, QDir::Files)) {
         QFile f(fi.absoluteFilePath());
@@ -176,12 +262,13 @@ void SessionMonitor::scanSessions()
 
         QString sid = obj["sessionId"].toString();
         qint64 pid = obj["pid"].toVariant().toLongLong();
+        QDateTime startedAt = QDateTime::fromMSecsSinceEpoch(obj["startedAt"].toVariant().toLongLong());
 
-        // skip zombie — PID file exists but process is dead
-        if (pid > 0 && !isPidAlive(pid)) continue;
+        // skip zombie/reused PID — PID file exists but process is dead or belongs to a newer process
+        if (pid > 0 && !isPidAlive(pid, startedAt)) continue;
 
         if (!sid.isEmpty())
-            m_knownPids[sid] = pid;
+            activePids[sid] = pid;
 
         // update monitored session's pid/cwd if found
         if (m_monitored.contains(sid)) {
@@ -189,14 +276,13 @@ void SessionMonitor::scanSessions()
             s.pid = pid;
             if (s.cwd.isEmpty()) s.cwd = obj["cwd"].toString();
             if (s.entrypoint.isEmpty()) s.entrypoint = obj["entrypoint"].toString();
-            if (s.label.isEmpty() && !s.cwd.isEmpty()) {
-                QStringList parts = s.cwd.split(QStringLiteral(R"(/\)"), Qt::SkipEmptyParts);
-                s.label = parts.size() >= 2
-                    ? parts[parts.size() - 2] + "/" + parts.last()
-                    : parts.last();
-            }
+            if (!s.startedAt.isValid()) s.startedAt = startedAt;
+            if (s.label.isEmpty() && !s.cwd.isEmpty())
+                s.label = makeSessionLabel(s.cwd);
         }
     }
+
+    m_knownPids = activePids;
 }
 
 void SessionMonitor::scanJsonlFiles()
@@ -263,7 +349,7 @@ static JsonlMetadata readJsonlMetadata(const QString &jsonPath)
 
     QString ts = obj["timestamp"].toString();
     if (!ts.isEmpty())
-        meta.firstTimestamp = QDateTime::fromString(ts, Qt::ISODateWithMs);
+        meta.firstTimestamp = parseClaudeTimestamp(ts);
 
     return meta;
 }
@@ -350,24 +436,40 @@ void SessionMonitor::processFile(const QString &path, CCSession &session)
     if (!f.open(QIODevice::ReadOnly)) return;
 
     qint64 size = f.size();
-    if (size <= session.filePos) {
-        f.close();
+    if (size < session.filePos)
+        session.filePos = 0;
+    if (size == session.filePos)
         return;
-    }
 
-    f.seek(session.filePos);
-    QByteArray data = f.readAll();
-    session.filePos = size;
-    f.close();
+    if (!f.seek(session.filePos))
+        return;
 
-    QList<QByteArray> lines = data.split('\n');
-    for (const auto &line : lines) {
-        if (line.trimmed().isEmpty()) continue;
+    int processedLines = 0;
+    qint64 processedBytes = 0;
+
+    while (!f.atEnd() && processedLines < MaxJsonlLinesPerScan && processedBytes < MaxJsonlBytesPerScan) {
+        qint64 lineStart = f.pos();
+        QByteArray line = f.readLine();
+        processedBytes += line.size();
+
+        // Claude Code writes JSONL incrementally; keep a partial tail for the
+        // next scan instead of advancing past an incomplete JSON object.
+        if (!line.endsWith('\n')) {
+            f.seek(lineStart);
+            break;
+        }
+
+        line = line.trimmed();
+        if (line.isEmpty()) continue;
+
         QJsonParseError err;
         QJsonDocument doc = QJsonDocument::fromJson(line, &err);
         if (err.error != QJsonParseError::NoError) continue;
         processEvent(doc.object(), session);
+        ++processedLines;
     }
+
+    session.filePos = f.pos();
 }
 
 void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
@@ -378,8 +480,10 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
 
     // update timestamp
     QString ts = event["timestamp"].toString();
-    if (!ts.isEmpty())
-        session.lastEventAt = QDateTime::fromString(ts, Qt::ISODateWithMs);
+    if (!ts.isEmpty()) {
+        QDateTime parsed = parseClaudeTimestamp(ts);
+        session.lastEventAt = parsed.isValid() ? parsed : QDateTime::currentDateTime();
+    }
     session.lastEventType = type;
 
     // extract session-level info
@@ -391,12 +495,8 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
         session.permissionMode = event["permissionMode"].toString();
 
     // derive label from cwd
-    if (session.label.isEmpty() && !session.cwd.isEmpty()) {
-        QStringList parts = session.cwd.split(QStringLiteral(R"(/\)"), Qt::SkipEmptyParts);
-        session.label = parts.size() >= 2
-            ? parts[parts.size() - 2] + "/" + parts.last()
-            : parts.last();
-    }
+    if (session.label.isEmpty() && !session.cwd.isEmpty())
+        session.label = makeSessionLabel(session.cwd);
 
     QJsonObject msg = event["message"].toObject();
 
@@ -409,9 +509,13 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
         // usage
         QJsonObject usage = msg["usage"].toObject();
         if (!usage.isEmpty()) {
-            session.tokensIn  = usage["input_tokens"].toInt(session.tokensIn);
-            session.tokensOut = usage["output_tokens"].toInt(session.tokensOut);
+            session.tokensIn += usage["input_tokens"].toInt();
+            session.tokensOut += usage["output_tokens"].toInt();
         }
+        if (event.contains("costUSD"))
+            session.costUSD += event["costUSD"].toDouble();
+        else if (event.contains("cost_usd"))
+            session.costUSD += event["cost_usd"].toDouble();
 
         // stop_reason
         QString stopReason = msg["stop_reason"].toString();
@@ -427,16 +531,21 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
                 if (!toolId.isEmpty()) {
                     session.pendingToolUseIds.insert(toolId);
                     session.toolUseTimestamps[toolId] = session.lastEventAt;
+                    session.toolUseNames[toolId] = block["name"].toString();
                 }
 
                 // track active files
                 QJsonObject input = block["input"].toObject();
                 QString fp = input["file_path"].toString();
                 if (fp.isEmpty()) fp = input["path"].toString();
-                if (!fp.isEmpty() && session.activeFiles.size() < 10) {
-                    QString base = fp.split(QStringLiteral(R"(/\)"), Qt::SkipEmptyParts).last();
-                    if (!session.activeFiles.contains(base))
-                        session.activeFiles.append(base);
+                if (!fp.isEmpty()) {
+                    QString base = QFileInfo(fp).fileName();
+                    if (base.isEmpty())
+                        base = fp;
+                    session.activeFiles.removeAll(base);
+                    session.activeFiles.append(base);
+                    while (session.activeFiles.size() > 10)
+                        session.activeFiles.removeFirst();
                 }
             }
         }
@@ -456,6 +565,7 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
                 QString toolId = block["tool_use_id"].toString();
                 session.pendingToolUseIds.remove(toolId);
                 session.toolUseTimestamps.remove(toolId);
+                session.toolUseNames.remove(toolId);
                 isToolResult = true;
             }
         }
@@ -467,6 +577,7 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
             }
         } else {
             // real user prompt (not tool_result) → AI should start thinking
+            session.activeFiles.clear();
             session.lastUserPromptAt = session.lastEventAt;
             session.awaitingAssistant = true;
             session.lastStopReason.clear();
@@ -475,7 +586,9 @@ void SessionMonitor::processEvent(const QJsonObject &event, CCSession &session)
 
     // system events
     if (type == "system") {
-        QString subtype = msg["subtype"].toString();
+        QString subtype = event["subtype"].toString();
+        if (subtype.isEmpty())
+            subtype = msg["subtype"].toString();
         if (subtype == "api_error") {
             session.lastEventType = "error";
         }
@@ -493,21 +606,27 @@ SessionStatus SessionMonitor::deriveStatus(const CCSession &session) const
 
     // pending tool_use without tool_result
     if (!session.pendingToolUseIds.isEmpty()) {
-        // Check if any tool_use has been waiting > 1 second (needs approval)
+        constexpr qint64 approvalThresholdSecs = 3;
+        bool allPendingToolsAreThinking = true;
         bool needsApproval = false;
         QDateTime now = QDateTime::currentDateTime();
-        for (auto it = session.toolUseTimestamps.begin(); it != session.toolUseTimestamps.end(); ++it) {
-            if (session.pendingToolUseIds.contains(it.key())) {
-                qint64 waitSecs = it.value().secsTo(now);
-                if (waitSecs >= 2) {
-                    needsApproval = true;
-                    break;
-                }
-            }
+
+        for (const QString &toolId : session.pendingToolUseIds) {
+            QString toolName = session.toolUseNames.value(toolId);
+            bool treatAsThinking = shouldTreatPendingToolAsThinking(session.permissionMode, toolName);
+            if (!treatAsThinking)
+                allPendingToolsAreThinking = false;
+
+            QDateTime issuedAt = session.toolUseTimestamps.value(toolId);
+            if (!treatAsThinking && issuedAt.isValid() && issuedAt.secsTo(now) >= approvalThresholdSecs)
+                needsApproval = true;
         }
+
+        if (allPendingToolsAreThinking)
+            return SessionStatus::Thinking;         // blue — auto-executing/read-only work
         if (needsApproval)
-            return SessionStatus::WaitingApproval;  // red — needs user approval
-        return SessionStatus::Thinking;             // blue — auto-executing
+            return SessionStatus::WaitingApproval;  // red — likely needs user approval
+        return SessionStatus::Thinking;             // blue — below approval threshold
     }
 
     // no events yet → idle, unless session just started

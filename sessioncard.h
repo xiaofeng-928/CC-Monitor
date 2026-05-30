@@ -21,6 +21,7 @@ public:
 
 signals:
     void clicked(const QString &sessionId);
+    void closeRequested(const QString &sessionId);
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;

@@ -30,8 +30,11 @@ SessionCard::SessionCard(QWidget *parent)
     m_closeBtn->setFixedSize(20, 20);
     m_closeBtn->setStyleSheet(
         "QPushButton { color: #585b70; border: none; font-size: 12px; }"
-        "QPushButton:hover { color: #f38ba8; }"
+        "QPushButton:hover { color: #e61e1e; }"
     );
+    connect(m_closeBtn, &QPushButton::clicked, this, [this]() {
+        emit closeRequested(m_sessionId);
+    });
 
     // Info layout (label + pid + close)
     auto *infoHeader = new QHBoxLayout;
@@ -66,7 +69,7 @@ void SessionCard::updateFrom(const CCSession &session)
     QStringList parts;
     if (!session.model.isEmpty())     parts << session.model;
     if (!session.gitBranch.isEmpty()) parts << session.gitBranch;
-    if (!session.activeFiles.isEmpty()) parts << session.activeFiles.first();
+    if (!session.activeFiles.isEmpty()) parts << session.activeFiles.last();
     m_detailText->setText(parts.join("  ·  "));
 
     applyStatusStyle(session.status);
@@ -79,16 +82,16 @@ void SessionCard::applyStatusStyle(SessionStatus status)
     switch (status) {
     case SessionStatus::WaitingApproval:
     case SessionStatus::Error:
-        dotColor = "#f38ba8"; borderColor = "#f38ba8"; bgColor = "#1e1e2e";
+        dotColor = "#e61e1e"; borderColor = "#e61e1e"; bgColor = "#1e1e2e";
         break;
     case SessionStatus::Thinking:
-        dotColor = "#89b4fa"; borderColor = "#313244"; bgColor = "#1e1e2e";
+        dotColor = "#1432e6"; borderColor = "#313244"; bgColor = "#1e1e2e";
         break;
     case SessionStatus::Stuck:
-        dotColor = "#f9e2af"; borderColor = "#f9e2af"; bgColor = "#1e1e2e";
+        dotColor = "#ffe119"; borderColor = "#ffe119"; bgColor = "#1e1e2e";
         break;
     case SessionStatus::Idle:
-        dotColor = "#a6e3a1"; borderColor = "#313244"; bgColor = "#1e1e2e";
+        dotColor = "#1eb446"; borderColor = "#313244"; bgColor = "#1e1e2e";
         break;
     }
 

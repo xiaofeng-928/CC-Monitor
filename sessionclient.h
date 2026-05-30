@@ -39,6 +39,7 @@ struct CCSession {
     QString   lastStopReason;
     QSet<QString> pendingToolUseIds;
     QMap<QString, QDateTime> toolUseTimestamps;  // track when each tool_use was issued
+    QMap<QString, QString> toolUseNames;         // tool_use id → tool name
     qint64    filePos = 0;      // incremental read offset
     QString   jsonlPath;        // cached path to JSONL file
     QDateTime lastUserPromptAt; // timestamp of last real user prompt (not tool_result)

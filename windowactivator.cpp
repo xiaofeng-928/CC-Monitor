@@ -259,10 +259,13 @@ void activateProcessWindow(qint64 pid)
     // Bring window to foreground
     // Windows restricts SetForegroundWindow - use the Alt key trick to bypass
     HWND fg = GetForegroundWindow();
+    DWORD fgThread = 0;
+    DWORD myThread = GetCurrentThreadId();
+    bool attached = false;
     if (fg) {
-        DWORD fgThread = GetWindowThreadProcessId(fg, nullptr);
-        DWORD myThread = GetCurrentThreadId();
-        AttachThreadInput(myThread, fgThread, TRUE);
+        fgThread = GetWindowThreadProcessId(fg, nullptr);
+        if (fgThread != myThread)
+            attached = AttachThreadInput(myThread, fgThread, TRUE);
     }
 
     // Restore minimized window first
@@ -277,11 +280,8 @@ void activateProcessWindow(qint64 pid)
 
     SetForegroundWindow(targetHwnd);
 
-    if (fg) {
-        DWORD fgThread = GetWindowThreadProcessId(fg, nullptr);
-        DWORD myThread = GetCurrentThreadId();
+    if (attached)
         AttachThreadInput(myThread, fgThread, FALSE);
-    }
 }
 
 #else
