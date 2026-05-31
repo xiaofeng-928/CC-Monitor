@@ -3,9 +3,11 @@
 
 #include <QWidget>
 #include <QMap>
+#include <QPointer>
 #include "sessionclient.h"
 
 class QVBoxLayout;
+class QPropertyAnimation;
 class SessionCard;
 class FloatingBall;
 class SoundManager;
@@ -27,6 +29,7 @@ protected:
 
 private:
     void setupUi();
+    void removeCard(SessionCard *card);
     void onSessionsUpdated(const QList<CCSession> &sessions);
     void onNeedsAttention(const CCSession &session);
     void onSessionStuck(const CCSession &session);
@@ -34,6 +37,7 @@ private:
     void addSession();
     void onToggleWindow();
     void onJumpToSession(qint64 pid);
+    void repositionNearBall();
     void elasticResize();
     void updateFloatingBall();
 
@@ -47,12 +51,16 @@ private:
 
     // Elastic layout
     int  m_toolbarHeight = 0;
+    QPropertyAnimation *m_resizeAnim = nullptr;
 
     // Drag / resize state
     QPoint m_dragPos;
     bool   m_resizingWidth = false;
     int    m_resizeStartWidth = 0;
     QPoint m_resizeStartPos;
+
+    // Ball-following state
+    bool   m_ballOnRight = true;
 };
 
 #endif // WIDGET_H

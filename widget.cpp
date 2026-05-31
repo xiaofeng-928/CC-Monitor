@@ -34,6 +34,8 @@ Widget::Widget(QWidget *parent)
             this, &Widget::onToggleWindow);
     connect(m_ball, &FloatingBall::jumpToSession,
             this, &Widget::onJumpToSession);
+    connect(m_ball, &FloatingBall::ballMoved,
+            this, &Widget::repositionNearBall);
 
     m_monitor->start();
     m_ball->show();
@@ -46,8 +48,10 @@ Widget::Widget(QWidget *parent)
     QScreen *screen = QGuiApplication::screenAt(ballPos + QPoint(ballW / 2, 0));
     if (screen) {
         QRect geo = screen->availableGeometry();
-        if (x + width() > geo.right())
+        if (x + width() > geo.right()) {
             x = ballPos.x() - width() - 8;
+            m_ballOnRight = false;
+        }
         if (y < geo.top()) y = geo.top();
         if (y + height() > geo.bottom()) y = geo.bottom() - height();
     }
@@ -101,7 +105,6 @@ QSize Widget::sizeHint() const
 {
     int cardH = 0;
     if (!m_cards.isEmpty()) {
-        // Ask the layout for its ideal size
         cardH = m_cardLayout->sizeHint().height();
     }
     int tb = (m_toolbarHeight > 0) ? m_toolbarHeight : 44;
@@ -112,21 +115,26 @@ void Widget::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     if (m_toolbarHeight == 0) {
-        // Measure toolbar height after first layout pass
         m_toolbarHeight = height() - m_cardContainer->height();
         if (m_toolbarHeight <= 0)
             m_toolbarHeight = 44;
-        // Resize to toolbar-only if no cards
         if (m_cards.isEmpty())
             resize(width(), m_toolbarHeight);
     }
+}
+
+void Widget::removeCard(SessionCard *card)
+{
+    if (!card) return;
+    m_cardLayout->removeWidget(card);
+    card->hide();
+    card->deleteLater();
 }
 
 void Widget::elasticResize()
 {
     QSize target = sizeHint();
 
-    // Cap at screen height
     QScreen *screen = QGuiApplication::screenAt(pos() + QPoint(width() / 2, height() / 2));
     if (!screen) screen = QGuiApplication::primaryScreen();
     if (screen) {
@@ -135,12 +143,16 @@ void Widget::elasticResize()
             target.setHeight(maxH);
     }
 
-    auto *anim = new QPropertyAnimation(this, "size");
-    anim->setDuration(150);
-    anim->setStartValue(size());
-    anim->setEndValue(target);
-    anim->setEasingCurve(QEasingCurve::OutQuad);
-    anim->start(QAbstractAnimation::DeleteWhenStopped);
+    // Reuse or create animation, stop old one to prevent jitter
+    if (!m_resizeAnim) {
+        m_resizeAnim = new QPropertyAnimation(this, "size");
+        m_resizeAnim->setDuration(150);
+        m_resizeAnim->setEasingCurve(QEasingCurve::OutQuad);
+    }
+    m_resizeAnim->stop();
+    m_resizeAnim->setStartValue(size());
+    m_resizeAnim->setEndValue(target);
+    m_resizeAnim->start();
 }
 
 void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
@@ -155,6 +167,10 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
             card = new SessionCard;
             connect(card, &SessionCard::clicked, this, &Widget::onCardClicked);
             connect(card, &SessionCard::closeRequested, this, [this](const QString &sessionId) {
+                // Reentrancy guard: if card was already removed during modal dialog, bail
+                if (!m_cards.contains(sessionId))
+                    return;
+
                 QMessageBox dlg(this);
                 dlg.setWindowTitle("Stop Monitoring");
                 dlg.setText("Remove this session from the monitor?");
@@ -168,16 +184,25 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
                     "border-radius: 4px; padding: 6px 20px; font-weight: bold; }"
                     "QPushButton:hover { background: #45475a; }"
                 );
-                // Fix: force layout then center properly
                 dlg.adjustSize();
                 QPoint globalCenter = mapToGlobal(rect().center());
                 dlg.move(globalCenter - dlg.rect().center());
                 if (dlg.exec() != QMessageBox::Yes)
                     return;
+
+                // UAF guard: if Widget was destroyed during modal dialog, bail
+                QPointer<Widget> self = this;
+                if (!self)
+                    return;
+
+                // Reentrancy: session may have been removed by onSessionsUpdated while dialog was open
+                if (!m_cards.contains(sessionId))
+                    return;
+
                 m_monitor->stopMonitoring(sessionId);
                 m_prevStatus.remove(sessionId);
-                if (SessionCard *removed = m_cards.take(sessionId))
-                    removed->deleteLater();
+                if (SessionCard *card = m_cards.take(sessionId))
+                    removeCard(card);
                 elasticResize();
             });
             m_cardLayout->addWidget(card);
@@ -198,8 +223,9 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
     for (auto it = m_cards.begin(); it != m_cards.end(); ) {
         if (!alive.contains(it.key())) {
             m_prevStatus.remove(it.key());
-            it.value()->deleteLater();
+            SessionCard *card = it.value();
             it = m_cards.erase(it);
+            removeCard(card);
             removed = true;
         } else {
             ++it;
@@ -267,13 +293,14 @@ void Widget::onToggleWindow()
 
         int x = ballPos.x() + ballW + 8;
         int y = ballPos.y();
+        m_ballOnRight = true;
 
         if (screen) {
             QRect geo = screen->availableGeometry();
-            // If not enough space on the right, put on the left
-            if (x + width() > geo.right())
+            if (x + width() > geo.right()) {
                 x = ballPos.x() - width() - 8;
-            // Clamp vertically
+                m_ballOnRight = false;
+            }
             if (y + height() > geo.bottom())
                 y = geo.bottom() - height();
             if (y < geo.top())
@@ -290,6 +317,40 @@ void Widget::onToggleWindow()
 void Widget::onJumpToSession(qint64 pid)
 {
     activateProcessWindow(pid);
+}
+
+void Widget::repositionNearBall()
+{
+    if (!isVisible()) return;
+
+    QPoint ballPos = m_ball->pos();
+    int ballW = m_ball->width();
+    QScreen *screen = QGuiApplication::screenAt(ballPos + QPoint(ballW / 2, 0));
+    if (!screen) screen = QGuiApplication::primaryScreen();
+
+    int x;
+    if (m_ballOnRight) {
+        x = ballPos.x() + ballW + 8;
+        if (screen && x + width() > screen->availableGeometry().right()) {
+            m_ballOnRight = false;
+            x = ballPos.x() - width() - 8;
+        }
+    }
+    if (!m_ballOnRight) {
+        x = ballPos.x() - width() - 8;
+        if (screen && x < screen->availableGeometry().left()) {
+            m_ballOnRight = true;
+            x = ballPos.x() + ballW + 8;
+        }
+    }
+
+    int y = ballPos.y();
+    if (screen) {
+        QRect geo = screen->availableGeometry();
+        y = qBound(geo.top(), y, geo.bottom() - height());
+    }
+
+    move(x, y);
 }
 
 void Widget::updateFloatingBall()
@@ -349,7 +410,6 @@ void Widget::mouseMoveEvent(QMouseEvent *event)
             move(event->globalPosition().toPoint() - m_dragPos);
         }
     } else {
-        // Update cursor based on proximity to right edge
         int rightEdge = width() - static_cast<int>(event->position().x());
         setCursor(rightEdge <= 6 ? Qt::SizeHorCursor : Qt::ArrowCursor);
     }

@@ -27,6 +27,7 @@ public:
 signals:
     void toggleMainWindow();
     void jumpToSession(qint64 pid);
+    void ballMoved();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -40,6 +41,7 @@ protected:
 
 private:
     void setupWindow();
+    void startPulseForStatus();
     void startPulseAnimation(int durationMs);
     void stopPulseAnimation();
     void snapToEdge();

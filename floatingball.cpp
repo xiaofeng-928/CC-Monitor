@@ -50,21 +50,7 @@ void FloatingBall::setAggregateStatus(SessionStatus status, int sessionCount,
 
     // Update pulse animation based on new status
     stopPulseAnimation();
-    switch (status) {
-    case SessionStatus::WaitingApproval:
-    case SessionStatus::Error:
-        startPulseAnimation(1000);
-        break;
-    case SessionStatus::Stuck:
-        startPulseAnimation(2000);
-        break;
-    case SessionStatus::Thinking:
-        startPulseAnimation(3000);
-        break;
-    case SessionStatus::Idle:
-        m_glowOpacity = 0.0;
-        break;
-    }
+    startPulseForStatus();
 
     setToolTip(computeTooltip());
     update();
@@ -92,22 +78,7 @@ void FloatingBall::triggerAlert(SessionStatus urgency, const QString &label, qin
     }
 
     connect(seq, &QSequentialAnimationGroup::finished, this, [this]() {
-        switch (m_status) {
-        case SessionStatus::WaitingApproval:
-        case SessionStatus::Error:
-            startPulseAnimation(1000);
-            break;
-        case SessionStatus::Stuck:
-            startPulseAnimation(2000);
-            break;
-        case SessionStatus::Thinking:
-            startPulseAnimation(3000);
-            break;
-        default:
-            m_glowOpacity = 0.0;
-            update();
-            break;
-        }
+        startPulseForStatus();
         sender()->deleteLater();
     });
 
@@ -278,6 +249,26 @@ void FloatingBall::contextMenuEvent(QContextMenuEvent *event)
     menu.exec(event->globalPos());
 }
 
+void FloatingBall::startPulseForStatus()
+{
+    switch (m_status) {
+    case SessionStatus::WaitingApproval:
+    case SessionStatus::Error:
+        startPulseAnimation(1000);
+        break;
+    case SessionStatus::Stuck:
+        startPulseAnimation(2000);
+        break;
+    case SessionStatus::Thinking:
+        startPulseAnimation(3000);
+        break;
+    case SessionStatus::Idle:
+        m_glowOpacity = 0.0;
+        update();
+        break;
+    }
+}
+
 void FloatingBall::startPulseAnimation(int durationMs)
 {
     m_pulseAnim = new QPropertyAnimation(this, "glowOpacity");
@@ -358,18 +349,10 @@ void FloatingBall::loadPosition()
 
 QString FloatingBall::statusColorHex(SessionStatus status) const
 {
-    switch (status) {
-    case SessionStatus::WaitingApproval:
-    case SessionStatus::Error:
-        return "#e61e1e";
-    case SessionStatus::Thinking:
-        return "#1432e6";
-    case SessionStatus::Stuck:
-        return "#ffe119";
-    case SessionStatus::Idle:
+    // Idle uses gray for the ball border (intentionally different from card/popup green)
+    if (status == SessionStatus::Idle)
         return "#313244";
-    }
-    return "#313244";
+    return sessionStatusColor(status);
 }
 
 QString FloatingBall::computeTooltip() const
@@ -422,4 +405,5 @@ void FloatingBall::moveEvent(QMoveEvent *event)
 {
     QWidget::moveEvent(event);
     repositionPopups();
+    emit ballMoved();
 }
