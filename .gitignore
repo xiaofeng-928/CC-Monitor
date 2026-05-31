@@ -1,24 +1,7 @@
-# Build directories
 build/
-build_*/
-build_test/
-
-# Qt user files
 *.pro.user
-
-# Compiled files
 *.o
-*.obj
 *.exe
-*.dll
-*.so
-*.dylib
-
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Claude
-.claude/
+moc_*
+ui_*
+qrc_*
