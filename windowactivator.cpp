@@ -178,10 +178,10 @@ static QString getSessionCwd(qint64 pid)
     return {};
 }
 
-void activateProcessWindow(qint64 pid)
+void activateProcessWindow(qint64 pid, const QString &cwd)
 {
-    // Get the session's cwd for VSCode window matching
-    QString cwd = getSessionCwd(pid);
+    // Use provided cwd, or fall back to scanning session files
+    QString effectiveCwd = cwd.isEmpty() ? getSessionCwd(pid) : cwd;
 
     // Walk up the process tree to find VSCode or terminal
     qint64 current = pid;
@@ -193,8 +193,8 @@ void activateProcessWindow(qint64 pid)
 
         // Found VSCode - use path-aware window finding
         if (isVSCodeProcess(name)) {
-            if (!cwd.isEmpty()) {
-                targetHwnd = findVSCodeWindowForPath(cwd);
+            if (!effectiveCwd.isEmpty()) {
+                targetHwnd = findVSCodeWindowForPath(effectiveCwd);
             } else {
                 targetHwnd = findWindowByPid(current);
             }
@@ -250,8 +250,8 @@ void activateProcessWindow(qint64 pid)
         targetHwnd = findWindowByPid(pid);
 
     // Fallback: try to find any VSCode window
-    if (!targetHwnd && !cwd.isEmpty()) {
-        targetHwnd = findVSCodeWindowForPath(cwd);
+    if (!targetHwnd && !effectiveCwd.isEmpty()) {
+        targetHwnd = findVSCodeWindowForPath(effectiveCwd);
     }
 
     if (!targetHwnd) return;
@@ -286,6 +286,6 @@ void activateProcessWindow(qint64 pid)
 
 #else
 
-void activateProcessWindow(qint64) {}
+void activateProcessWindow(qint64, const QString &) {}
 
 #endif

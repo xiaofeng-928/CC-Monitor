@@ -29,7 +29,8 @@ protected:
 
 private:
     void setupUi();
-    void removeCard(SessionCard *card);
+    void removeCard(const QString &sessionId);
+    void addCard(const QString &sessionId, SessionCard *card);
     void onSessionsUpdated(const QList<CCSession> &sessions);
     void onNeedsAttention(const CCSession &session);
     void onSessionStuck(const CCSession &session);
@@ -55,6 +56,7 @@ private:
 
     // Drag / resize state
     QPoint m_dragPos;
+    bool   m_dragging = false;
     bool   m_resizingWidth = false;
     int    m_resizeStartWidth = 0;
     QPoint m_resizeStartPos;

@@ -77,23 +77,10 @@ void SessionCard::updateFrom(const CCSession &session)
 
 void SessionCard::applyStatusStyle(SessionStatus status)
 {
-    QString dotColor, borderColor, bgColor;
-
-    switch (status) {
-    case SessionStatus::WaitingApproval:
-    case SessionStatus::Error:
-        dotColor = "#e61e1e"; borderColor = "#e61e1e"; bgColor = "#1e1e2e";
-        break;
-    case SessionStatus::Thinking:
-        dotColor = "#1432e6"; borderColor = "#313244"; bgColor = "#1e1e2e";
-        break;
-    case SessionStatus::Stuck:
-        dotColor = "#ffe119"; borderColor = "#ffe119"; bgColor = "#1e1e2e";
-        break;
-    case SessionStatus::Idle:
-        dotColor = "#1eb446"; borderColor = "#313244"; bgColor = "#1e1e2e";
-        break;
-    }
+    QString dotColor = sessionStatusColor(status);
+    QString borderColor = (status == SessionStatus::Thinking || status == SessionStatus::Idle)
+        ? "#313244" : dotColor;
+    QString bgColor = "#1e1e2e";
 
     m_statusDot->setStyleSheet(QString("background: %1; border-radius: 8px;").arg(dotColor));
     setStyleSheet(QString(

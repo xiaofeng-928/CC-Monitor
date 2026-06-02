@@ -39,7 +39,9 @@ void FloatingBall::setAggregateStatus(SessionStatus status, int sessionCount,
                                        int waitingCount, int thinkingCount,
                                        int stuckCount)
 {
-    if (m_status == status && m_sessionCount == sessionCount)
+    if (m_status == status && m_sessionCount == sessionCount
+        && m_waitingCount == waitingCount && m_thinkingCount == thinkingCount
+        && m_stuckCount == stuckCount)
         return;
 
     m_status = status;
@@ -77,9 +79,9 @@ void FloatingBall::triggerAlert(SessionStatus urgency, const QString &label, qin
         seq->addAnimation(down);
     }
 
-    connect(seq, &QSequentialAnimationGroup::finished, this, [this]() {
+    connect(seq, &QSequentialAnimationGroup::finished, this, [this, seq]() {
         startPulseForStatus();
-        sender()->deleteLater();
+        seq->deleteLater();
     });
 
     seq->start();

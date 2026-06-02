@@ -123,12 +123,20 @@ void Widget::showEvent(QShowEvent *event)
     }
 }
 
-void Widget::removeCard(SessionCard *card)
+void Widget::addCard(const QString &sessionId, SessionCard *card)
 {
-    if (!card) return;
-    m_cardLayout->removeWidget(card);
-    card->hide();
-    card->deleteLater();
+    m_cardLayout->addWidget(card);
+    m_cards[sessionId] = card;
+}
+
+void Widget::removeCard(const QString &sessionId)
+{
+    m_prevStatus.remove(sessionId);
+    if (SessionCard *card = m_cards.take(sessionId)) {
+        m_cardLayout->removeWidget(card);
+        card->hide();
+        card->deleteLater();
+    }
 }
 
 void Widget::elasticResize()
@@ -200,13 +208,10 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
                     return;
 
                 m_monitor->stopMonitoring(sessionId);
-                m_prevStatus.remove(sessionId);
-                if (SessionCard *card = m_cards.take(sessionId))
-                    removeCard(card);
+                removeCard(sessionId);
                 elasticResize();
             });
-            m_cardLayout->addWidget(card);
-            m_cards[s.sessionId] = card;
+            addCard(s.sessionId, card);
         }
         card->updateFrom(s);
 
@@ -220,16 +225,14 @@ void Widget::onSessionsUpdated(const QList<CCSession> &sessions)
     }
 
     bool removed = false;
-    for (auto it = m_cards.begin(); it != m_cards.end(); ) {
-        if (!alive.contains(it.key())) {
-            m_prevStatus.remove(it.key());
-            SessionCard *card = it.value();
-            it = m_cards.erase(it);
-            removeCard(card);
-            removed = true;
-        } else {
-            ++it;
-        }
+    QStringList toRemove;
+    for (auto it = m_cards.constBegin(); it != m_cards.constEnd(); ++it) {
+        if (!alive.contains(it.key()))
+            toRemove.append(it.key());
+    }
+    for (const auto &sid : toRemove) {
+        removeCard(sid);
+        removed = true;
     }
 
     // Resize whenever card count changes (added or removed)
@@ -254,8 +257,10 @@ void Widget::onSessionStuck(const CCSession &session)
 void Widget::onCardClicked(const QString &sessionId)
 {
     auto it = m_cards.find(sessionId);
-    if (it != m_cards.end())
-        activateProcessWindow(it.value()->pid());
+    if (it != m_cards.end()) {
+        qint64 pid = it.value()->pid();
+        activateProcessWindow(pid, m_monitor->getCwdForPid(pid));
+    }
 }
 
 void Widget::addSession()
@@ -316,7 +321,7 @@ void Widget::onToggleWindow()
 
 void Widget::onJumpToSession(qint64 pid)
 {
-    activateProcessWindow(pid);
+    activateProcessWindow(pid, m_monitor->getCwdForPid(pid));
 }
 
 void Widget::repositionNearBall()
@@ -393,6 +398,7 @@ void Widget::mousePressEvent(QMouseEvent *event)
             m_resizeStartPos = event->globalPosition().toPoint();
         } else {
             m_resizingWidth = false;
+            m_dragging = true;
             m_dragPos = event->globalPosition().toPoint() - pos();
         }
     }
@@ -406,7 +412,7 @@ void Widget::mouseMoveEvent(QMouseEvent *event)
             int dx = event->globalPosition().x() - m_resizeStartPos.x();
             int newWidth = qMax(minimumWidth(), m_resizeStartWidth + dx);
             resize(newWidth, height());
-        } else if (!m_dragPos.isNull()) {
+        } else if (m_dragging) {
             move(event->globalPosition().toPoint() - m_dragPos);
         }
     } else {
@@ -418,6 +424,7 @@ void Widget::mouseMoveEvent(QMouseEvent *event)
 
 void Widget::mouseReleaseEvent(QMouseEvent *event)
 {
+    m_dragging = false;
     m_resizingWidth = false;
     QWidget::mouseReleaseEvent(event);
 }

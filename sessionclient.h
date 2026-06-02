@@ -15,6 +15,22 @@ enum class SessionStatus {
     Error             // 红色 — 错误
 };
 
+inline QString sessionStatusColor(SessionStatus status)
+{
+    switch (status) {
+    case SessionStatus::WaitingApproval:
+    case SessionStatus::Error:
+        return "#e61e1e";
+    case SessionStatus::Thinking:
+        return "#1432e6";
+    case SessionStatus::Stuck:
+        return "#ffe119";
+    case SessionStatus::Idle:
+        return "#1eb446";
+    }
+    return "#313244";
+}
+
 struct CCSession {
     QString  sessionId;
     QString  label;
@@ -63,6 +79,7 @@ public:
     void startMonitoring(const QString &sessionId);
     void stopMonitoring(const QString &sessionId);
     bool isMonitoring(const QString &sessionId) const;
+    QString getCwdForPid(qint64 pid) const;
 
 signals:
     void sessionsUpdated(const QList<CCSession> &sessions);
@@ -72,6 +89,7 @@ signals:
 private:
     void onTimeout();
     void scanSessions();
+    void buildJsonlSessionIdMap();
     void scanJsonlFiles();
     void processFile(const QString &path, CCSession &session);
     void processEvent(const QJsonObject &event, CCSession &session);
@@ -83,6 +101,8 @@ private:
     int     m_sessionScanCounter = 0;       // decouple scanSessions frequency from JSONL
     QMap<QString, CCSession> m_monitored;   // sessionId → session
     QMap<QString, qint64>    m_knownPids;   // sessionId → pid (from sessions/)
+    QMap<qint64, QString>    m_pidToJsonlSessionId;  // pid → JSONL internal sessionId
+    QSet<QString>            m_claimedJsonlSessionIds;  // JSONL-internal sessionIds claimed by active sessions
 };
 
 #endif // SESSIONCLIENT_H

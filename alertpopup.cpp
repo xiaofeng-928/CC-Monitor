@@ -140,18 +140,7 @@ qint64 AlertPopup::pid() const
 
 QString AlertPopup::statusColorHex(SessionStatus status) const
 {
-    switch (status) {
-    case SessionStatus::WaitingApproval:
-    case SessionStatus::Error:
-        return "#e61e1e";
-    case SessionStatus::Stuck:
-        return "#ffe119";
-    case SessionStatus::Thinking:
-        return "#1432e6";
-    case SessionStatus::Idle:
-        return "#1eb446";
-    }
-    return "#313244";
+    return sessionStatusColor(status);
 }
 
 QString AlertPopup::statusText(SessionStatus status) const
